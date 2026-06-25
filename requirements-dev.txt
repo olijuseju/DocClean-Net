@@ -1,0 +1,12 @@
+# Development dependencies — install with: pip install -r requirements-dev.txt
+# Assumes production deps already installed via requirements.txt or pyproject.toml[dev].
+
+-r requirements.txt
+
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.0.0
+ruff>=0.1.0
+torchinfo>=1.8.0
+matplotlib>=3.7.0
+jupyter>=1.0.0
