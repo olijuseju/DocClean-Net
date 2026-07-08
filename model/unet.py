@@ -1,7 +1,7 @@
 """
 model/unet.py
 =============
-Lightweight U-Net (~660k parameters) for structured background removal
+Lightweight U-Net (~482k parameters (482,449)) for structured background removal
 from scanned handwritten documents.
 
 Architecture summary:
@@ -60,7 +60,7 @@ class UNet(nn.Module):
         Input:  (B, 1, 256, 256)  float32, values in [0, 1]
         Output: (B, 1, 256, 256)  float32, values in [0, 1]
 
-    Parameter count: ~660k
+    Parameter count: 482,449
     """
 
     def __init__(self, in_channels: int = 1, out_channels: int = 1) -> None:
