@@ -45,6 +45,7 @@ dev = [
 [project.scripts]
 docclean-classic = "classic_pipeline.digitize_notebook:main"
 docclean-gui     = "gui.digitize_gui:main"
+docclean-inference-gui = "gui.inference_gui:main"
 
 [project.urls]
 Repository = "https://github.com/YOUR_USERNAME/docclean-net"

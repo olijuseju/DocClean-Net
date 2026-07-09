@@ -10,3 +10,4 @@ ruff>=0.1.0
 torchinfo>=1.8.0
 matplotlib>=3.7.0
 jupyter>=1.0.0
+tkinterdnd2>=0.4.0  # optional: enables drag-and-drop in inference GUI

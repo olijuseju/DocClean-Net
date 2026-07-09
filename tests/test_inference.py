@@ -375,3 +375,199 @@ def test_build_comparison_figure_with_crop_has_six_panels(
     import matplotlib.pyplot as plt
 
     plt.close(fig)
+
+
+# ── scripts/thicken_strokes.py ────────────────────────────────────────────────
+
+
+def _load_thicken_module():
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "thicken_strokes.py"
+    spec = importlib.util.spec_from_file_location("thicken_strokes", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_thicken_strokes_amount_zero_is_noop() -> None:
+    viz = _load_thicken_module()
+    img = np.full((20, 20), 255, dtype=np.uint8)
+    img[10, 10] = 0
+    out = viz.thicken_strokes(img, amount=0)
+    assert np.array_equal(out, img)
+    assert out is not img  # returns a copy, not the same array
+
+
+def test_thicken_strokes_grows_a_single_ink_pixel() -> None:
+    viz = _load_thicken_module()
+    img = np.full((21, 21), 255, dtype=np.uint8)
+    img[10, 10] = 0
+    out = viz.thicken_strokes(img, amount=1)
+    ink_pixels = int((out < 255).sum())
+    assert ink_pixels > 1  # a single dark pixel spreads to its neighbors
+
+
+def test_thicken_strokes_larger_amount_spreads_further() -> None:
+    viz = _load_thicken_module()
+    img = np.full((41, 41), 255, dtype=np.uint8)
+    img[20, 20] = 0
+    out1 = viz.thicken_strokes(img, amount=1)
+    out2 = viz.thicken_strokes(img, amount=2)
+    assert (out2 < 255).sum() > (out1 < 255).sum()
+
+
+def test_thicken_strokes_rejects_negative_amount() -> None:
+    viz = _load_thicken_module()
+    with pytest.raises(ValueError):
+        viz.thicken_strokes(np.zeros((5, 5), dtype=np.uint8), amount=-1)
+
+
+def test_thicken_strokes_output_shape_and_dtype_preserved() -> None:
+    viz = _load_thicken_module()
+    img = np.full((30, 40), 255, dtype=np.uint8)
+    out = viz.thicken_strokes(img, amount=1)
+    assert out.shape == img.shape
+    assert out.dtype == np.uint8
+
+
+def test_remove_small_dots_erases_isolated_single_pixel() -> None:
+    viz = _load_thicken_module()
+    img = np.full((20, 20), 255, dtype=np.uint8)
+    img[10, 10] = 0  # 1px isolated dot
+    out = viz.remove_small_dots(img, min_area=3)
+    assert out[10, 10] == 255
+    assert (out == 255).all()
+
+
+def test_remove_small_dots_keeps_components_at_or_above_min_area() -> None:
+    viz = _load_thicken_module()
+    img = np.full((20, 20), 255, dtype=np.uint8)
+    img[10:13, 10] = 0  # 3px vertical component, area == min_area
+    out = viz.remove_small_dots(img, min_area=3)
+    assert (out[10:13, 10] == 0).all()
+
+
+def test_remove_small_dots_removes_component_below_min_area_only() -> None:
+    viz = _load_thicken_module()
+    img = np.full((20, 20), 255, dtype=np.uint8)
+    img[10, 10] = 0            # 1px dot, should be removed
+    img[15:18, 15] = 0         # 3px stroke, should survive
+    out = viz.remove_small_dots(img, min_area=3)
+    assert out[10, 10] == 255
+    assert (out[15:18, 15] == 0).all()
+
+
+def test_remove_small_dots_rejects_invalid_min_area() -> None:
+    viz = _load_thicken_module()
+    with pytest.raises(ValueError):
+        viz.remove_small_dots(np.zeros((5, 5), dtype=np.uint8), min_area=0)
+
+
+def test_remove_small_dots_output_shape_and_dtype_preserved() -> None:
+    viz = _load_thicken_module()
+    img = np.full((30, 40), 255, dtype=np.uint8)
+    out = viz.remove_small_dots(img, min_area=3)
+    assert out.shape == img.shape
+    assert out.dtype == np.uint8
+
+
+# ── scripts/run_pipeline.py ───────────────────────────────────────────────────
+
+
+def _load_run_pipeline_module():
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "run_pipeline.py"
+    spec = importlib.util.spec_from_file_location("run_pipeline", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_process_image_returns_uint8_grayscale(
+    untrained_checkpoint: Path, sample_scan_path: Path
+) -> None:
+    rp = _load_run_pipeline_module()
+    result = rp.process_image(untrained_checkpoint, sample_scan_path, device="cpu")
+    assert result.dtype == np.uint8
+    assert result.ndim == 2
+
+
+def test_process_image_amount_zero_and_min_dot_area_zero_skip_postprocessing(
+    untrained_checkpoint: Path, sample_scan_path: Path, monkeypatch
+) -> None:
+    rp = _load_run_pipeline_module()
+    calls = {"denoise": 0, "thicken": 0}
+
+    def fake_denoise(img, min_area, ink_threshold):
+        calls["denoise"] += 1
+        return img
+
+    def fake_thicken(img, amount):
+        calls["thicken"] += 1
+        return img
+
+    monkeypatch.setattr(rp, "remove_small_dots", fake_denoise)
+    monkeypatch.setattr(rp, "thicken_strokes", fake_thicken)
+
+    rp.process_image(
+        untrained_checkpoint, sample_scan_path, device="cpu",
+        min_dot_area=0, thicken_amount=0,
+    )
+    assert calls == {"denoise": 0, "thicken": 0}
+
+
+def test_run_pipeline_single_file_writes_one_output(
+    untrained_checkpoint: Path, sample_scan_path: Path, tmp_output_dir: Path
+) -> None:
+    rp = _load_run_pipeline_module()
+    out_path = tmp_output_dir / "single_result.png"
+
+    written = rp.run_pipeline(
+        untrained_checkpoint, sample_scan_path, out_path, device="cpu"
+    )
+
+    assert written == [out_path]
+    assert out_path.exists()
+
+
+def test_run_pipeline_directory_processes_every_image(
+    untrained_checkpoint: Path, tmp_output_dir: Path, rng: np.random.Generator
+) -> None:
+    rp = _load_run_pipeline_module()
+    in_dir = tmp_output_dir / "batch_in"
+    in_dir.mkdir()
+    for name in ["a.png", "b.png", "c.png"]:
+        _imwrite(in_dir / name, _noisy_bgr(64, 64, rng))
+    out_dir = tmp_output_dir / "batch_out"
+
+    written = rp.run_pipeline(untrained_checkpoint, in_dir, out_dir, device="cpu")
+
+    assert len(written) == 3
+    assert {p.name for p in written} == {"a.png", "b.png", "c.png"}
+    for p in written:
+        assert p.exists()
+
+
+def test_run_pipeline_raises_filenotfounderror_for_missing_input(
+    untrained_checkpoint: Path, tmp_output_dir: Path
+) -> None:
+    rp = _load_run_pipeline_module()
+    with pytest.raises(FileNotFoundError):
+        rp.run_pipeline(
+            untrained_checkpoint, tmp_output_dir / "nope.png",
+            tmp_output_dir / "out.png", device="cpu",
+        )
+
+
+def test_run_pipeline_raises_filenotfounderror_for_empty_directory(
+    untrained_checkpoint: Path, tmp_output_dir: Path
+) -> None:
+    rp = _load_run_pipeline_module()
+    empty_dir = tmp_output_dir / "empty_in"
+    empty_dir.mkdir()
+    with pytest.raises(FileNotFoundError):
+        rp.run_pipeline(
+            untrained_checkpoint, empty_dir, tmp_output_dir / "out", device="cpu",
+        )
