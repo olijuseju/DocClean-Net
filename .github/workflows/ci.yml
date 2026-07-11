@@ -29,8 +29,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install CPU-only torch to keep CI fast (no CUDA needed for unit tests)
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # Install CPU-only torch + torchvision together so pip resolves a
+          # compatible pair (installing them separately let piq's unpinned
+          # torchvision dependency pull an incompatible build from PyPI).
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements-dev.txt
 
       - name: Lint with ruff
