@@ -65,5 +65,10 @@ htmlcov/
 *.png.bak
 debug_*.png
 output_*.png
+stroke_check.png
 metrics.csv
+!benchmark_results/metrics.csv
 plots/
+
+# ── Internal working notes (not meant for a public portfolio repo) ────────────
+current_status.md
