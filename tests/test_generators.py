@@ -12,7 +12,12 @@ import numpy as np
 import pytest
 
 from data.augmentation import augment_pair
-from data.generators.degradations import add_blue_grid, add_ruled_lines, add_watermark
+from data.generators.degradations import (
+    add_blue_grid,
+    add_ruled_lines,
+    add_stain,
+    add_watermark,
+)
 from data.generators.paper import generate_paper
 from data.generators.strokes import generate_strokes
 
@@ -491,3 +496,181 @@ class TestAugmentPair:
         d_aug, c_aug = augment_pair(dirty, clean, rng)
         assert int(d_aug.min()) >= 0 and int(d_aug.max()) <= 255
         assert int(c_aug.min()) >= 0 and int(c_aug.max()) <= 255
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 5.1 — muestreo domain-robust: ink_color, grids oscuros, add_stain
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGenerateStrokesInkColor:
+
+    def test_generate_strokes_default_ink_color_is_black(
+        self, rng: np.random.Generator
+    ) -> None:
+        """Sin ink_color, comportamiento histórico: trazos negro puro."""
+        canvas = np.full((128, 128, 3), 255, dtype=np.uint8)
+        result = generate_strokes(canvas, rng, n_strokes=10)
+        assert int(result.min()) == 0
+
+    def test_generate_strokes_faint_ink_color_produces_gray_strokes(
+        self, rng: np.random.Generator
+    ) -> None:
+        """Con ink_color gris, el mínimo es el gris pedido, no negro."""
+        canvas = np.full((128, 128, 3), 255, dtype=np.uint8)
+        result = generate_strokes(canvas, rng, n_strokes=10, ink_color=(140, 140, 140))
+        assert int(result.min()) >= 138  # margen por anti-aliasing de cv2
+        assert int(result.min()) <= 142
+        assert (result < 250).any()  # hay trazos
+
+    def test_generate_strokes_faint_ink_does_not_modify_canvas_in_place(
+        self, rng: np.random.Generator
+    ) -> None:
+        canvas = np.full((64, 64, 3), 255, dtype=np.uint8)
+        backup = canvas.copy()
+        generate_strokes(canvas, rng, n_strokes=5, ink_color=(120, 120, 120))
+        assert np.array_equal(canvas, backup)
+
+
+class TestAddBlueGridDarkAndOpaque:
+
+    def _paper(self) -> np.ndarray:
+        return np.full((128, 128, 3), 230, dtype=np.uint8)
+
+    def test_add_blue_grid_explicit_color_bgr_is_respected(
+        self, rng: np.random.Generator
+    ) -> None:
+        """Con color_bgr gris y blend opaco a opacity 1.0, las líneas
+        alcanzan el color pedido sobre el papel."""
+        result = add_blue_grid(
+            self._paper(),
+            rng,
+            spacing=20,
+            thickness=1.5,
+            angle_deg=0.0,
+            opacity=1.0,
+            color_bgr=(80, 80, 80),
+            opaque_lines=True,
+        )
+        assert int(result.min()) <= 85  # el centro de línea llega al color puro
+
+    def test_add_blue_grid_opaque_lines_reach_darker_than_soft_blend(
+        self, rng: np.random.Generator
+    ) -> None:
+        """El blend histórico satura en peso 0.35; el opaco llega mucho más
+        oscuro con los mismos parámetros — la razón de su existencia."""
+        kwargs = dict(spacing=20, thickness=1.5, angle_deg=0.0, color_bgr=(80, 80, 80))
+        soft = add_blue_grid(self._paper(), rng, opacity=0.7, **kwargs)
+        opaque = add_blue_grid(
+            self._paper(), rng, opacity=1.0, opaque_lines=True, **kwargs
+        )
+        assert int(opaque.min()) < int(soft.min()) - 40
+
+    def test_add_blue_grid_opaque_lines_never_lighten_ink(
+        self, rng: np.random.Generator
+    ) -> None:
+        """La cuadrícula opaca oscurece papel pero no aclara trazos negros
+        donde los cruza (física de tinta sobre grid impreso)."""
+        paper = self._paper()
+        paper[60:68, :, :] = 0  # trazo negro horizontal que la grid cruzará
+        result = add_blue_grid(
+            paper,
+            rng,
+            spacing=20,
+            thickness=2.0,
+            angle_deg=0.0,
+            opacity=1.0,
+            color_bgr=(90, 90, 90),
+            opaque_lines=True,
+        )
+        assert int(result[60:68, :, :].max()) == 0
+
+    def test_add_blue_grid_dense_spacing_produces_more_line_pixels(
+        self, rng: np.random.Generator
+    ) -> None:
+        """Spacing 10 px (milimetrado real) genera claramente más píxeles
+        de línea que spacing 40 px."""
+        kwargs = dict(
+            thickness=1.0,
+            angle_deg=0.0,
+            opacity=1.0,
+            color_bgr=(80, 80, 80),
+            opaque_lines=True,
+        )
+        dense = add_blue_grid(self._paper(), rng, spacing=10, **kwargs)
+        sparse = add_blue_grid(self._paper(), rng, spacing=40, **kwargs)
+        dense_lines = int((dense.min(axis=2) < 150).sum())
+        sparse_lines = int((sparse.min(axis=2) < 150).sum())
+        assert dense_lines > 2 * sparse_lines
+
+    def test_add_blue_grid_default_call_unchanged_by_new_params(self) -> None:
+        """Los nuevos parámetros con defaults no alteran la distribución
+        v1.0: misma semilla, mismo resultado que la llamada histórica."""
+        paper = self._paper()
+        a = add_blue_grid(paper, np.random.default_rng(11))
+        b = add_blue_grid(
+            paper, np.random.default_rng(11), color_bgr=None, opaque_lines=False
+        )
+        np.testing.assert_array_equal(a, b)
+
+
+class TestAddStain:
+
+    def _paper(self) -> np.ndarray:
+        return np.full((128, 128, 3), 240, dtype=np.uint8)
+
+    def test_add_stain_output_shape_matches_input(
+        self, rng: np.random.Generator
+    ) -> None:
+        result = add_stain(self._paper(), rng)
+        assert result.shape == (128, 128, 3)
+
+    def test_add_stain_output_dtype_is_uint8(self, rng: np.random.Generator) -> None:
+        result = add_stain(self._paper(), rng)
+        assert result.dtype == np.uint8
+
+    def test_add_stain_does_not_modify_input_in_place(
+        self, rng: np.random.Generator
+    ) -> None:
+        paper = self._paper()
+        backup = paper.copy()
+        add_stain(paper, rng)
+        assert np.array_equal(paper, backup)
+
+    def test_add_stain_darkens_paper_somewhere(self, rng: np.random.Generator) -> None:
+        result = add_stain(self._paper(), rng, n_blobs=3, strength=0.6)
+        assert int(result.min()) < 230
+
+    def test_add_stain_never_brightens_any_pixel(
+        self, rng: np.random.Generator
+    ) -> None:
+        """La atenuación es multiplicativa con ganancia ≤ 1: solo oscurece."""
+        result = add_stain(self._paper(), rng, n_blobs=4, strength=0.7)
+        assert int(result.max()) <= 240
+
+    def test_add_stain_black_ink_stays_black(self, rng: np.random.Generator) -> None:
+        paper = self._paper()
+        paper[50:58, :, :] = 0
+        result = add_stain(paper, rng, n_blobs=4, strength=0.7)
+        assert int(result[50:58, :, :].max()) == 0
+
+    def test_add_stain_zero_strength_returns_copy(
+        self, rng: np.random.Generator
+    ) -> None:
+        paper = self._paper()
+        result = add_stain(paper, rng, strength=0.0)
+        np.testing.assert_array_equal(result, paper)
+        assert result is not paper
+
+    def test_add_stain_deterministic_with_same_seed(self) -> None:
+        paper = self._paper()
+        a = add_stain(paper, np.random.default_rng(5))
+        b = add_stain(paper, np.random.default_rng(5))
+        np.testing.assert_array_equal(a, b)
+
+    def test_add_stain_raises_on_grayscale_input(
+        self, rng: np.random.Generator
+    ) -> None:
+        gray = np.full((64, 64), 240, dtype=np.uint8)
+        with pytest.raises(ValueError):
+            add_stain(gray, rng)

@@ -32,6 +32,8 @@ def add_blue_grid(
     thickness: float | None = None,
     angle_deg: float | None = None,
     opacity: float | None = None,
+    color_bgr: tuple[int, int, int] | None = None,
+    opaque_lines: bool = False,
 ) -> np.ndarray:
     """Superpone una cuadrícula azul al estilo de cuaderno de colegio español.
 
@@ -53,6 +55,18 @@ def add_blue_grid(
         Ángulo de rotación en grados. Si es None, se muestrea en [-3.0, 3.0].
     opacity : float | None
         Opacidad en [0.0, 1.0]. Si es None, se muestrea en [0.2, 0.7].
+    color_bgr : tuple[int, int, int] | None
+        Color BGR de las líneas. Si es None, azul de cuaderno muestreado
+        (comportamiento histórico). Grises oscuros casi acromáticos, p. ej.
+        (72, 60, 60), simulan papel milimetrado impreso — modo de fallo
+        real medido en Phase 5 (grid gris ≈85, BGR (72, 57, 57)).
+    opaque_lines : bool
+        Si es False (default), blend histórico con peso efectivo opacity/2
+        (máx. 0.35) — cuadrícula azul translúcida de cuaderno. Si es True,
+        blend de solo-oscurecimiento con peso efectivo = opacity (hasta
+        1.0): las líneas alcanzan su color puro sobre el papel, pero nunca
+        aclaran tinta más oscura donde la cruzan — modelo físico de la
+        cuadrícula impresa con la tinta dibujada por encima.
 
     Returns
     -------
@@ -73,14 +87,19 @@ def add_blue_grid(
     if opacity is None:
         opacity = float(rng.uniform(0.2, 0.7))
 
-    # Color azul de cuaderno: B alto, G medio, R bajo
-    b_val = int(rng.integers(160, 210))
-    g_val = int(rng.integers(120, 170))
-    r_val = int(rng.integers(80, 130))
-    grid_color = (b_val, g_val, r_val)
+    if color_bgr is None:
+        # Color azul de cuaderno: B alto, G medio, R bajo
+        b_val = int(rng.integers(160, 210))
+        g_val = int(rng.integers(120, 170))
+        r_val = int(rng.integers(80, 130))
+        grid_color = (b_val, g_val, r_val)
+    else:
+        grid_color = color_bgr
 
     grid_layer = _render_grid(h, w, spacing, thickness, angle_deg, grid_color)
 
+    if opaque_lines:
+        return _blend_lines_darken(image, grid_layer, opacity)
     return _blend_lines_only(image, grid_layer, opacity)
 
 
@@ -352,4 +371,134 @@ def _blend_lines_only(
     result = base_f * (1.0 - line_mask * opacity / 2) + layer_f * (
         line_mask * opacity / 2
     )
+    return np.clip(result, 0.0, 255.0).astype(np.uint8)
+
+
+def _blend_lines_darken(
+    base: np.ndarray,
+    layer_img: np.ndarray,
+    opacity: float,
+) -> np.ndarray:
+    """Mezcla `layer_img` sobre `base` con peso completo, solo oscureciendo.
+
+    A diferencia de _blend_lines_only (peso efectivo opacity/2), aquí el peso
+    efectivo es `opacity` sin atenuar, de modo que con opacity=1.0 las líneas
+    alcanzan su color puro sobre el papel — necesario para cuadrículas
+    impresas oscuras (papel milimetrado, gris ≈70-120). El resultado se
+    limita con np.minimum(base, mezcla): la cuadrícula nunca aclara tinta
+    más oscura que ella en los cruces, replicando la física real (la tinta
+    se dibuja por encima de la cuadrícula impresa).
+
+    Parameters
+    ----------
+    base : np.ndarray
+        Imagen de fondo BGR, shape (H, W, 3), dtype uint8.
+    layer_img : np.ndarray
+        Capa BGR, shape (H, W, 3), dtype uint8, fondo blanco y líneas de color.
+    opacity : float
+        Peso de la capa en [0.0, 1.0] en los píxeles de línea.
+
+    Returns
+    -------
+    np.ndarray
+        Imagen mezclada BGR, shape (H, W, 3), dtype uint8.
+    """
+    base_f = base.astype(np.float32)
+    layer_f = layer_img.astype(np.float32)
+
+    line_mask = (layer_img.min(axis=2) < 250).astype(np.float32)[:, :, np.newaxis]
+
+    blended = base_f * (1.0 - line_mask * opacity) + layer_f * (line_mask * opacity)
+    result = np.minimum(base_f, blended)
+    return np.clip(result, 0.0, 255.0).astype(np.uint8)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# add_stain
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def add_stain(
+    image: np.ndarray,
+    rng: np.random.Generator,
+    n_blobs: int | None = None,
+    strength: float | None = None,
+    color_bgr: tuple[int, int, int] | None = None,
+) -> np.ndarray:
+    """Añade manchas irregulares translúcidas (café, agua, humedad).
+
+    Genera blobs elípticos aleatorios, los difumina con un kernel grande
+    para obtener bordes suaves de baja frecuencia, y los aplica como
+    atenuación multiplicativa hacia el color de la mancha. Al ser
+    multiplicativa, la tinta negra permanece intacta y el papel se tiñe —
+    el comportamiento observado en los escaneos reales con daño de agua
+    (demo_6_edge_case del set de fallo de Phase 5).
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Imagen BGR, shape (H, W, 3), dtype uint8.
+    rng : np.random.Generator
+        Generador de aleatoriedad con semilla.
+    n_blobs : int | None
+        Número de manchas. Si es None, se muestrea en [1, 4].
+    strength : float | None
+        Intensidad máxima de la mancha en [0.0, 1.0] (1.0 = el papel alcanza
+        el color puro de la mancha en el centro del blob). Si es None, se
+        muestrea en [0.25, 0.70].
+    color_bgr : tuple[int, int, int] | None
+        Color BGR de la mancha. Si es None, marrón-grisáceo muestreado
+        (B más bajo, R más alto — tono cálido de café/humedad).
+
+    Returns
+    -------
+    np.ndarray
+        Imagen BGR, shape (H, W, 3), dtype uint8.
+
+    Raises
+    ------
+    ValueError
+        Si image no es BGR (H, W, 3).
+    """
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(f"image debe ser BGR (H, W, 3), recibido shape={image.shape}")
+
+    h, w = image.shape[:2]
+
+    if n_blobs is None:
+        n_blobs = int(rng.integers(1, 5))
+    if strength is None:
+        strength = float(rng.uniform(0.25, 0.70))
+    if color_bgr is None:
+        base_tone = int(rng.integers(100, 165))
+        warm_r = int(rng.integers(10, 35))
+        warm_g = int(rng.integers(0, 15))
+        color_bgr = (base_tone, base_tone + warm_g, base_tone + warm_r)
+
+    if n_blobs <= 0 or strength <= 0.0:
+        return image.copy()
+
+    # Máscara de blobs elípticos sobre lienzo binario
+    mask = np.zeros((h, w), dtype=np.float32)
+    for _ in range(n_blobs):
+        cx = int(rng.integers(0, w))
+        cy = int(rng.integers(0, h))
+        ax = int(rng.integers(max(4, w // 12), max(5, w // 3)))
+        ay = int(rng.integers(max(4, h // 12), max(5, h // 3)))
+        angle = float(rng.uniform(0.0, 180.0))
+        cv2.ellipse(mask, (cx, cy), (ax, ay), angle, 0, 360, 1.0, thickness=-1)
+
+    # Blur grande: bordes de mancha suaves, sin contornos duros
+    k = max(3, (min(h, w) // 4) | 1)
+    alpha = cv2.GaussianBlur(mask, (k, k), 0)
+    peak = float(alpha.max())
+    if peak < 1e-6:
+        return image.copy()
+    alpha = (alpha / peak) * strength  # (H, W) en [0, strength]
+
+    # Atenuación multiplicativa hacia el color de la mancha:
+    # gain_c = 1 - alpha * (1 - color_c/255). Papel blanco -> color; tinta 0 -> 0.
+    color_f = np.array(color_bgr, dtype=np.float32) / 255.0
+    gain = 1.0 - alpha[:, :, np.newaxis] * (1.0 - color_f[np.newaxis, np.newaxis, :])
+    result = image.astype(np.float32) * gain
     return np.clip(result, 0.0, 255.0).astype(np.uint8)

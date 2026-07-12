@@ -42,6 +42,7 @@ def generate_strokes(
     canvas: np.ndarray,
     rng: np.random.Generator,
     n_strokes: int | None = None,
+    ink_color: tuple[int, int, int] | None = None,
 ) -> np.ndarray:
     """Dibuja trazos sintéticos en negro sobre el canvas recibido.
 
@@ -62,18 +63,25 @@ def generate_strokes(
         Número total de primitivas a dibujar. Si es None, se muestrea
         aleatoriamente en [_MIN_STROKES, _MAX_STROKES]. Útil en tests
         para fijar la cantidad sin modificar el rng.
+    ink_color : tuple[int, int, int] | None
+        Color BGR de los trazos. Si es None, negro puro (0, 0, 0) —
+        comportamiento histórico. Grises claros (p. ej. (140, 140, 140))
+        simulan lápiz tenue, uno de los modos de fallo reales de Phase 5.
 
     Returns
     -------
     np.ndarray
         Imagen BGR, shape (H, W, 3), dtype uint8.
-        Fondo = canvas original. Trazos = negro (0, 0, 0).
+        Fondo = canvas original. Trazos = ink_color (negro por defecto).
         Este array es el ground truth limpio (clean image) del par de entrenamiento.
     """
     if canvas.ndim != 3 or canvas.shape[2] != 3:
         raise ValueError(
             f"canvas debe ser BGR (H, W, 3), recibido shape={canvas.shape}"
         )
+
+    if ink_color is None:
+        ink_color = _INK_COLOR
 
     result = canvas.copy()
     h, w = result.shape[:2]
@@ -90,16 +98,16 @@ def generate_strokes(
     n_bezier, n_lines, n_ellipses, n_panels = counts
 
     for _ in range(n_bezier):
-        _draw_bezier(result, h, w, rng)
+        _draw_bezier(result, h, w, rng, ink_color)
 
     for _ in range(n_lines):
-        _draw_line(result, h, w, rng)
+        _draw_line(result, h, w, rng, ink_color)
 
     for _ in range(n_ellipses):
-        _draw_ellipse(result, h, w, rng)
+        _draw_ellipse(result, h, w, rng, ink_color)
 
     for _ in range(n_panels):
-        _draw_panel(result, h, w, rng)
+        _draw_panel(result, h, w, rng, ink_color)
 
     return result
 
@@ -153,6 +161,7 @@ def _draw_bezier(
     h: int,
     w: int,
     rng: np.random.Generator,
+    color: tuple[int, int, int] = _INK_COLOR,
 ) -> None:
     """Dibuja una curva Bézier cúbica sobre img (in-place).
 
@@ -175,7 +184,7 @@ def _draw_bezier(
     for i in range(len(curve_pts) - 1):
         p1 = (int(curve_pts[i, 0]), int(curve_pts[i, 1]))
         p2 = (int(curve_pts[i + 1, 0]), int(curve_pts[i + 1, 1]))
-        cv2.line(img, p1, p2, _INK_COLOR, thickness, lineType=cv2.LINE_AA)
+        cv2.line(img, p1, p2, color, thickness, lineType=cv2.LINE_AA)
 
 
 def _cubic_bezier(
@@ -214,6 +223,7 @@ def _draw_line(
     h: int,
     w: int,
     rng: np.random.Generator,
+    color: tuple[int, int, int] = _INK_COLOR,
 ) -> None:
     """Dibuja un segmento de línea recto sobre img (in-place).
 
@@ -229,7 +239,7 @@ def _draw_line(
             break
 
     thickness = _random_thickness(rng)
-    cv2.line(img, (x1, y1), (x2, y2), _INK_COLOR, thickness, lineType=cv2.LINE_AA)
+    cv2.line(img, (x1, y1), (x2, y2), color, thickness, lineType=cv2.LINE_AA)
 
 
 def _draw_ellipse(
@@ -237,6 +247,7 @@ def _draw_ellipse(
     h: int,
     w: int,
     rng: np.random.Generator,
+    color: tuple[int, int, int] = _INK_COLOR,
 ) -> None:
     """Dibuja la elipse (solo contorno) sobre img (in-place)."""
     margin = 8
@@ -258,7 +269,7 @@ def _draw_ellipse(
         angle,
         0,
         360,
-        _INK_COLOR,
+        color,
         thickness,
         lineType=cv2.LINE_AA,
     )
@@ -269,6 +280,7 @@ def _draw_panel(
     h: int,
     w: int,
     rng: np.random.Generator,
+    color: tuple[int, int, int] = _INK_COLOR,
 ) -> None:
     """Dibuja un marco rectangular de viñeta de cómic sobre img (in-place).
 
@@ -299,4 +311,4 @@ def _draw_panel(
         return
 
     thickness = _random_thickness(rng)
-    cv2.rectangle(img, (x1, y1), (x2, y2), _INK_COLOR, thickness, lineType=cv2.LINE_AA)
+    cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness, lineType=cv2.LINE_AA)

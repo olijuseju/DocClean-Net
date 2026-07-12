@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 import torch
 
+from data.generate_dataset import generate_pair
 from model.dataset import DocCleanDataset, _extract_patch, _imread, _to_tensor
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -280,3 +281,64 @@ def test_dataset_augmentation_enabled_does_not_crash(
         dirty, clean = dataset_aug[i]
         assert dirty.shape == (1, PATCH_SIZE, PATCH_SIZE)
         assert clean.shape == (1, PATCH_SIZE, PATCH_SIZE)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 5.1 — generate_pair con mezcla domain-robust
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGeneratePairDomainRobust:
+
+    def test_generate_pair_output_shapes_and_dtype(self) -> None:
+        dirty, clean = generate_pair(idx=0, size=128, seed=123)
+        assert dirty.shape == (128, 128, 3)
+        assert clean.shape == (128, 128, 3)
+        assert dirty.dtype == np.uint8
+        assert clean.dtype == np.uint8
+
+    def test_generate_pair_deterministic_for_same_idx_and_seed(self) -> None:
+        d_a, c_a = generate_pair(idx=3, size=128, seed=42)
+        d_b, c_b = generate_pair(idx=3, size=128, seed=42)
+        np.testing.assert_array_equal(d_a, d_b)
+        np.testing.assert_array_equal(c_a, c_b)
+
+    def test_generate_pair_robust_prob_zero_matches_legacy_distribution(self) -> None:
+        """Con domain_robust_prob=0.0 el par es idéntico salvo por la moneda
+        inicial del rng — se verifica que ningún par de un lote presente
+        rasgos exclusivos del régimen robust (papel sombreado < 150)."""
+        for idx in range(6):
+            dirty, clean = generate_pair(
+                idx=idx, size=128, seed=99, domain_robust_prob=0.0
+            )
+            # papel del clean nunca sombreado: percentil alto sobre 200
+            assert float(np.percentile(clean, 90)) > 200.0
+            # dirty sin iluminación: su percentil alto también se mantiene alto
+            assert float(np.percentile(dirty, 90)) > 195.0
+
+    def test_generate_pair_clean_target_is_never_shaded(self) -> None:
+        """La iluminación y las manchas se aplican SOLO al dirty: el clean
+        conserva papel brillante incluso con domain_robust_prob=1.0."""
+        for idx in range(8):
+            _, clean = generate_pair(idx=idx, size=128, seed=7, domain_robust_prob=1.0)
+            assert float(np.percentile(clean, 90)) > 195.0
+
+    def test_generate_pair_robust_batch_contains_shaded_dirty_samples(self) -> None:
+        """Con domain_robust_prob=1.0 e iluminación al 70%, un lote de pares
+        contiene al menos uno con papel sombreado (p25 del dirty por debajo
+        del soporte v1.0)."""
+        shaded = 0
+        for idx in range(12):
+            dirty, _ = generate_pair(
+                idx=idx, size=128, seed=1234, domain_robust_prob=1.0
+            )
+            if float(np.percentile(dirty, 25)) < 150.0:
+                shaded += 1
+        assert shaded >= 1
+
+    def test_generate_pair_robust_prob_changes_output_for_same_seed(self) -> None:
+        """La moneda robust consume el rng: prob 0.0 y 1.0 divergen (documenta
+        que un dataset v1.1 no es byte-idéntico a uno v1.0 con misma seed)."""
+        d_legacy, _ = generate_pair(idx=2, size=128, seed=42, domain_robust_prob=0.0)
+        d_robust, _ = generate_pair(idx=2, size=128, seed=42, domain_robust_prob=1.0)
+        assert not np.array_equal(d_legacy, d_robust)
