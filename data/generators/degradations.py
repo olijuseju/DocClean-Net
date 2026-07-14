@@ -165,6 +165,7 @@ def add_ruled_lines(
     thickness: int | None = None,
     opacity: float | None = None,
     color_bgr: tuple[int, int, int] | None = None,
+    opaque_lines: bool = False,
 ) -> np.ndarray:
     """Superpone líneas horizontales de papel rayado.
 
@@ -182,6 +183,10 @@ def add_ruled_lines(
         Opacidad en [0.0, 1.0]. Si es None, se muestrea en [0.15, 0.60].
     color_bgr : tuple[int, int, int] | None
         Color BGR. Si es None, se genera un azul de cuaderno.
+    opaque_lines : bool
+        Si es False (default), blend histórico con peso efectivo opacity/2.
+        Si es True, blend de solo-oscurecimiento con peso completo (ver
+        add_blue_grid) — pauta impresa oscura sin aclarar tinta en cruces.
 
     Returns
     -------
@@ -211,6 +216,8 @@ def add_ruled_lines(
         cv2.line(layer, (0, y), (w, y), color_bgr, thickness, lineType=cv2.LINE_AA)
         y += spacing
 
+    if opaque_lines:
+        return _blend_lines_darken(base=image, layer_img=layer, opacity=opacity)
     return _blend_lines_only(layer_img=layer, base=image, opacity=opacity)
 
 
@@ -500,5 +507,87 @@ def add_stain(
     # gain_c = 1 - alpha * (1 - color_c/255). Papel blanco -> color; tinta 0 -> 0.
     color_f = np.array(color_bgr, dtype=np.float32) / 255.0
     gain = 1.0 - alpha[:, :, np.newaxis] * (1.0 - color_f[np.newaxis, np.newaxis, :])
+    result = image.astype(np.float32) * gain
+    return np.clip(result, 0.0, 255.0).astype(np.uint8)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# add_bleedthrough
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def add_bleedthrough(
+    image: np.ndarray,
+    rng: np.random.Generator,
+    strength: float | None = None,
+    blur_sigma: float | None = None,
+) -> np.ndarray:
+    """Simula tinta transparentándose desde el reverso de la página.
+
+    Genera una capa de trazos sintéticos, la ESPEJA horizontalmente (el
+    reverso de una página se ve invertido), la difumina y la aplica como
+    atenuación multiplicativa muy tenue. Reproduce los fantasmas observados
+    en los escaneos reales del set de fallo de Phase 5, que las referencias
+    limpias de aceptación eliminan.
+
+    Debe aplicarse SOLO a la imagen dirty del par: el target queda sin
+    fantasmas y la red aprende a eliminarlos.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Imagen BGR, shape (H, W, 3), dtype uint8.
+    rng : np.random.Generator
+        Generador de aleatoriedad con semilla.
+    strength : float | None
+        Intensidad del fantasma en [0.0, 1.0] (fracción de oscurecimiento en
+        el centro del trazo espejado). Si es None, se muestrea en
+        [0.06, 0.28] — visible pero más tenue que la tinta más clara del
+        régimen robust.
+    blur_sigma : float | None
+        Sigma del desenfoque gaussiano en píxeles (difusión de la tinta a
+        través del papel). Si es None, se muestrea en [1.0, 3.0].
+
+    Returns
+    -------
+    np.ndarray
+        Imagen BGR, shape (H, W, 3), dtype uint8.
+
+    Raises
+    ------
+    ValueError
+        Si image no es BGR (H, W, 3).
+    """
+    # Import local para evitar ciclo degradations <-> strokes a nivel de módulo
+    from data.generators.strokes import generate_strokes
+
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(f"image debe ser BGR (H, W, 3), recibido shape={image.shape}")
+
+    if strength is None:
+        strength = float(rng.uniform(0.06, 0.28))
+    if blur_sigma is None:
+        blur_sigma = float(rng.uniform(1.0, 3.0))
+    if strength <= 0.0:
+        return image.copy()
+
+    h, w = image.shape[:2]
+
+    white = np.full((h, w, 3), 255, dtype=np.uint8)
+    n_strokes = int(rng.integers(3, 10))
+    reverse = generate_strokes(white, rng, n_strokes=n_strokes)
+    reverse = cv2.flip(reverse, 1)  # el reverso se ve espejado
+
+    ghost_gray = cv2.cvtColor(reverse, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    ghost = 1.0 - ghost_gray  # 1.0 en el centro del trazo, 0.0 en papel
+    k = max(3, (int(blur_sigma * 6) | 1))
+    ghost = cv2.GaussianBlur(ghost, (k, k), blur_sigma)
+    peak = float(ghost.max())
+    if peak < 1e-6:
+        return image.copy()
+    ghost = (ghost / peak) * strength  # (H, W) en [0, strength]
+
+    # Atenuación multiplicativa: el papel se oscurece levemente, tinta 0 intacta
+    gain = 1.0 - ghost[:, :, np.newaxis]
     result = image.astype(np.float32) * gain
     return np.clip(result, 0.0, 255.0).astype(np.uint8)

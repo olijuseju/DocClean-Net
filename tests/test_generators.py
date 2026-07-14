@@ -13,6 +13,7 @@ import pytest
 
 from data.augmentation import augment_pair
 from data.generators.degradations import (
+    add_bleedthrough,
     add_blue_grid,
     add_ruled_lines,
     add_stain,
@@ -674,3 +675,106 @@ class TestAddStain:
         gray = np.full((64, 64), 240, dtype=np.uint8)
         with pytest.raises(ValueError):
             add_stain(gray, rng)
+
+
+class TestAddRuledLinesDarkOpaque:
+
+    def _paper(self) -> np.ndarray:
+        return np.full((128, 128, 3), 230, dtype=np.uint8)
+
+    def test_add_ruled_lines_opaque_dark_reaches_line_color(
+        self, rng: np.random.Generator
+    ) -> None:
+        result = add_ruled_lines(
+            self._paper(),
+            rng,
+            spacing=20,
+            thickness=2,
+            opacity=1.0,
+            color_bgr=(85, 85, 85),
+            opaque_lines=True,
+        )
+        assert int(result.min()) <= 90
+
+    def test_add_ruled_lines_opaque_never_lightens_ink(
+        self, rng: np.random.Generator
+    ) -> None:
+        paper = self._paper()
+        paper[:, 40:46, :] = 0  # trazo vertical que cruza todas las pautas
+        result = add_ruled_lines(
+            paper,
+            rng,
+            spacing=20,
+            thickness=2,
+            opacity=1.0,
+            color_bgr=(90, 90, 90),
+            opaque_lines=True,
+        )
+        assert int(result[:, 40:46, :].max()) == 0
+
+    def test_add_ruled_lines_default_call_unchanged_by_new_param(self) -> None:
+        paper = self._paper()
+        a = add_ruled_lines(paper, np.random.default_rng(13))
+        b = add_ruled_lines(paper, np.random.default_rng(13), opaque_lines=False)
+        np.testing.assert_array_equal(a, b)
+
+
+class TestAddBleedthrough:
+
+    def _paper(self) -> np.ndarray:
+        return np.full((128, 128, 3), 240, dtype=np.uint8)
+
+    def test_add_bleedthrough_output_shape_and_dtype(
+        self, rng: np.random.Generator
+    ) -> None:
+        result = add_bleedthrough(self._paper(), rng)
+        assert result.shape == (128, 128, 3)
+        assert result.dtype == np.uint8
+
+    def test_add_bleedthrough_does_not_modify_input_in_place(
+        self, rng: np.random.Generator
+    ) -> None:
+        paper = self._paper()
+        backup = paper.copy()
+        add_bleedthrough(paper, rng)
+        assert np.array_equal(paper, backup)
+
+    def test_add_bleedthrough_darkens_paper_somewhere(
+        self, rng: np.random.Generator
+    ) -> None:
+        result = add_bleedthrough(self._paper(), rng, strength=0.25)
+        assert int(result.min()) < 235
+
+    def test_add_bleedthrough_never_brightens_any_pixel(
+        self, rng: np.random.Generator
+    ) -> None:
+        result = add_bleedthrough(self._paper(), rng, strength=0.25)
+        assert int(result.max()) <= 240
+
+    def test_add_bleedthrough_is_fainter_than_faint_ink(
+        self, rng: np.random.Generator
+    ) -> None:
+        """El fantasma máximo (strength 0.28) queda por encima del gris 160
+        sobre papel 240: nunca compite con la banda de tinta a preservar."""
+        result = add_bleedthrough(self._paper(), rng, strength=0.28)
+        assert int(result.min()) >= 165
+
+    def test_add_bleedthrough_black_ink_stays_black(
+        self, rng: np.random.Generator
+    ) -> None:
+        paper = self._paper()
+        paper[60:66, :, :] = 0
+        result = add_bleedthrough(paper, rng, strength=0.28)
+        assert int(result[60:66, :, :].max()) == 0
+
+    def test_add_bleedthrough_deterministic_with_same_seed(self) -> None:
+        paper = self._paper()
+        a = add_bleedthrough(paper, np.random.default_rng(4))
+        b = add_bleedthrough(paper, np.random.default_rng(4))
+        np.testing.assert_array_equal(a, b)
+
+    def test_add_bleedthrough_raises_on_grayscale_input(
+        self, rng: np.random.Generator
+    ) -> None:
+        with pytest.raises(ValueError):
+            add_bleedthrough(np.full((64, 64), 240, dtype=np.uint8), rng)

@@ -37,6 +37,7 @@ from tqdm import tqdm
 # Imports relativos: funcionan cuando el paquete está instalado o cuando
 # se ejecuta desde la raíz del repo con `python data/generate_dataset.py`.
 from data.generators.degradations import (
+    add_bleedthrough,
     add_blue_grid,
     add_ruled_lines,
     add_stain,
@@ -45,6 +46,7 @@ from data.generators.degradations import (
 from data.generators.illumination import apply_illumination
 from data.generators.paper import generate_paper
 from data.generators.strokes import generate_strokes
+from inference.io_utils import _imread
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constantes
@@ -75,6 +77,35 @@ _ROBUST_GRID_OPACITY_RANGE = (0.55, 1.0)
 _ROBUST_ILLUMINATION_PROB = 0.70
 _ROBUST_STAIN_PROB = 0.25
 
+# Arquetipo "milimetrado impreso" (Phase 5.1.1): muestreo CORRELACIONADO del
+# combo de fallo real de los cómics (grid denso + oscuro + tinta tenue). El
+# muestreo independiente de arriba diluye la probabilidad conjunta de este
+# combo a ~0.6% del dataset — medido, insuficiente como señal de
+# entrenamiento. El arquetipo la eleva a ~12% (≈1200 imágenes de 10k).
+# Intensidad efectiva de línea resultante ≈ [60, 120] sobre papel 230
+# (real medido: 85).
+_ROBUST_ARCHETYPE_PROB = 0.35
+_ARCH_GRID_SPACING_RANGE = (10, 20)
+_ARCH_GRID_GRAY_RANGE = (60, 100)
+_ARCH_GRID_OPACITY_RANGE = (0.85, 1.0)
+_ARCH_INK_FAINT_PROB = 0.70
+
+# Pauta (ruled) oscura en régimen robust no-arquetipo: prob. de que las
+# líneas horizontales usen el tratamiento impreso oscuro en vez del azul.
+_ROBUST_RULED_DARK_PROB = 0.35
+_ROBUST_RULED_OPACITY_RANGE = (0.60, 0.95)
+
+# Bleed-through (Phase 5.1.2): prob. de fantasmas del reverso en el dirty
+# dentro del régimen robust. Observado en los escaneos reales del set de
+# fallo; las referencias limpias de aceptación lo eliminan.
+_ROBUST_BLEEDTHROUGH_PROB = 0.30
+
+# Fondos reales (Phase 5.1.2 / 5.4-lite del plan): pares compuestos sobre
+# tiles de papel escaneado real sin tinta (scripts/harvest_backgrounds.py).
+# dirty = min(fondo_real, trazos); clean = papel sintético + mismos trazos.
+_DEFAULT_REAL_BG_PROB = 0.15
+_REAL_BG_SCALE_RANGE = (0.85, 1.30)  # jitter de DPI; conserva el régimen de spacing
+
 # Pesos de degradación: [blue_grid, ruled_lines, grid+lines, watermark]
 _DEGRADATION_WEIGHTS = np.array([0.50, 0.25, 0.15, 0.10])
 
@@ -100,6 +131,8 @@ def generate_pair(
     size: int,
     seed: int,
     domain_robust_prob: float = _DEFAULT_DOMAIN_ROBUST_PROB,
+    real_bg_paths: tuple[str, ...] | None = None,
+    real_bg_prob: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Genera un par (dirty, clean) para el índice `idx`.
 
@@ -123,32 +156,204 @@ def generate_pair(
     domain_robust_prob : float
         Probabilidad en [0.0, 1.0] de usar el muestreo domain-robust.
         0.0 reproduce exactamente la distribución v1.0.
+    real_bg_paths : tuple[str, ...] | None
+        Rutas ORDENADAS a tiles cuadrados de fondo real sin tinta
+        (determinismo del dataset). None o vacío = 100% sintético.
+    real_bg_prob : float
+        Probabilidad en [0.0, 1.0] de componer el par sobre un fondo real.
+        Sin efecto si real_bg_paths está vacío. El par resultante puede ser
+        menor que `size` si los tiles lo son (se conserva la escala nativa
+        de la cuadrícula real; nunca se reescala hacia arriba).
 
     Returns
     -------
     tuple[np.ndarray, np.ndarray]
-        (dirty, clean) — ambas BGR uint8, shape (size, size, 3).
+        (dirty, clean) — ambas BGR uint8, shape (side, side, 3) con
+        side = size salvo en la rama de fondo real (side = min(size, tile)).
     """
     rng = np.random.default_rng(seed=seed + idx)
 
+    if real_bg_paths and rng.random() < real_bg_prob:
+        return _generate_real_bg_pair(size, rng, real_bg_paths)
+
     robust = bool(rng.random() < domain_robust_prob)
+    archetype = robust and bool(rng.random() < _ROBUST_ARCHETYPE_PROB)
 
     paper = generate_paper(size, size, rng)
 
+    ink_faint_prob = _ARCH_INK_FAINT_PROB if archetype else _ROBUST_INK_FAINT_PROB
     ink_color: tuple[int, int, int] | None = None
-    if robust and rng.random() < _ROBUST_INK_FAINT_PROB:
+    if robust and rng.random() < ink_faint_prob:
         gray = int(rng.integers(*_ROBUST_INK_GRAY_RANGE))
         ink_color = (gray, gray, gray)
 
     clean = generate_strokes(paper, rng, ink_color=ink_color)
-    dirty = _apply_random_degradation(clean, rng, robust=robust)
+    dirty = _apply_random_degradation(clean, rng, robust=robust, archetype=archetype)
 
+    if robust and rng.random() < _ROBUST_BLEEDTHROUGH_PROB:
+        dirty = add_bleedthrough(dirty, rng)
     if robust and rng.random() < _ROBUST_STAIN_PROB:
         dirty = add_stain(dirty, rng)
     if robust and rng.random() < _ROBUST_ILLUMINATION_PROB:
         dirty = apply_illumination(dirty, rng)
 
     return dirty, clean
+
+
+def _load_real_bg_crop(
+    size: int,
+    rng: np.random.Generator,
+    real_bg_paths: tuple[str, ...],
+) -> np.ndarray:
+    """Carga un tile real y devuelve un recorte cuadrado aumentado.
+
+    Aumentos que preservan la naturaleza de la cuadrícula: recorte con
+    jitter de escala tipo DPI (_REAL_BG_SCALE_RANGE), rotaciones de 90° y
+    volteo. El lado de salida es min(size, lado_del_tile): un tile menor
+    que `size` NUNCA se reescala hacia arriba (estiraría el spacing real
+    fuera del régimen medido).
+
+    Parameters
+    ----------
+    size : int
+        Lado máximo deseado en píxeles.
+    rng : np.random.Generator
+        Fuente de aleatoriedad.
+    real_bg_paths : tuple[str, ...]
+        Rutas a tiles de fondo real. Debe ser no vacío.
+
+    Returns
+    -------
+    np.ndarray
+        Recorte BGR, shape (side, side, 3), dtype uint8, side <= size.
+
+    Raises
+    ------
+    ValueError
+        Si el tile elegido no puede leerse.
+    """
+    path = Path(real_bg_paths[int(rng.integers(0, len(real_bg_paths)))])
+    bg = _imread(path)
+    if bg is None:
+        raise ValueError(f"no se pudo leer el tile de fondo real: {path}")
+    h, w = bg.shape[:2]
+
+    side = min(size, h, w)
+    scale = float(rng.uniform(*_REAL_BG_SCALE_RANGE))
+    crop = max(32, min(int(round(side * scale)), h, w))
+    y0 = int(rng.integers(0, h - crop + 1))
+    x0 = int(rng.integers(0, w - crop + 1))
+    region = bg[y0 : y0 + crop, x0 : x0 + crop]
+    if crop != side:
+        region = cv2.resize(region, (side, side), interpolation=cv2.INTER_AREA)
+
+    k = int(rng.integers(0, 4))
+    region = np.rot90(region, k=k)
+    if rng.random() < 0.5:
+        region = region[:, ::-1]
+    return np.ascontiguousarray(region)
+
+
+def _generate_real_bg_pair(
+    size: int,
+    rng: np.random.Generator,
+    real_bg_paths: tuple[str, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Genera un par componiendo trazos sintéticos sobre un fondo real.
+
+    dirty = min(fondo_real, trazos): la tinta se dibuja por encima del papel
+    impreso real (cuadrícula, textura, margen y bleed-through reales).
+    clean = papel sintético limpio + los mismos trazos. El target queda
+    perfectamente definido sin anotación manual. Sobre el dirty se aplican
+    además las degradaciones fotométricas del régimen robust.
+
+    Parameters
+    ----------
+    size : int
+        Lado máximo del par en píxeles (ver _load_real_bg_crop).
+    rng : np.random.Generator
+        Fuente de aleatoriedad del par.
+    real_bg_paths : tuple[str, ...]
+        Rutas a tiles de fondo real. Debe ser no vacío.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        (dirty, clean) — ambas BGR uint8, shape (side, side, 3).
+    """
+    bg = _load_real_bg_crop(size, rng, real_bg_paths)
+    side = bg.shape[0]
+
+    ink_color: tuple[int, int, int] | None = None
+    if rng.random() < _ROBUST_INK_FAINT_PROB:
+        gray = int(rng.integers(*_ROBUST_INK_GRAY_RANGE))
+        ink_color = (gray, gray, gray)
+
+    white = np.full((side, side, 3), 255, dtype=np.uint8)
+    strokes = generate_strokes(white, rng, ink_color=ink_color)
+
+    dirty = np.minimum(bg, strokes)
+    paper = generate_paper(side, side, rng)
+    clean = np.minimum(paper, strokes)
+
+    if rng.random() < _ROBUST_BLEEDTHROUGH_PROB:
+        dirty = add_bleedthrough(dirty, rng)
+    if rng.random() < _ROBUST_STAIN_PROB:
+        dirty = add_stain(dirty, rng)
+    if rng.random() < _ROBUST_ILLUMINATION_PROB:
+        dirty = apply_illumination(dirty, rng)
+
+    return dirty, clean
+
+
+def _sample_archetype_grid_params(
+    rng: np.random.Generator,
+) -> dict:
+    """Muestrea la cuadrícula del arquetipo milimetrado impreso.
+
+    Todos los ejes correlacionados en el régimen duro: spacing denso
+    [10, 20), gris oscuro [60, 100), blend opaco con opacity [0.85, 1.0].
+    Réplica directa del papel de los cómics del set de fallo (grid gris
+    ≈85, spacing 12-16 px).
+
+    Returns
+    -------
+    dict
+        Kwargs para add_blue_grid.
+    """
+    gray = int(rng.integers(*_ARCH_GRID_GRAY_RANGE))
+    blue_bias = int(rng.integers(0, _ROBUST_GRID_BLUE_BIAS_MAX))
+    return {
+        "spacing": int(rng.integers(*_ARCH_GRID_SPACING_RANGE)),
+        "opacity": float(rng.uniform(*_ARCH_GRID_OPACITY_RANGE)),
+        "color_bgr": (min(255, gray + blue_bias), gray, gray),
+        "opaque_lines": True,
+    }
+
+
+def _sample_robust_ruled_params(
+    rng: np.random.Generator,
+) -> dict:
+    """Muestrea parámetros de pauta (ruled) del régimen domain-robust.
+
+    Con prob. _ROBUST_RULED_DARK_PROB produce pauta impresa oscura (mismo
+    tratamiento que la cuadrícula: gris casi acromático, blend opaco);
+    en el resto, azul histórica.
+
+    Returns
+    -------
+    dict
+        Kwargs para add_ruled_lines: opacity, color_bgr, opaque_lines.
+    """
+    if rng.random() < _ROBUST_RULED_DARK_PROB:
+        gray = int(rng.integers(*_ROBUST_GRID_GRAY_RANGE))
+        blue_bias = int(rng.integers(0, _ROBUST_GRID_BLUE_BIAS_MAX))
+        return {
+            "opacity": float(rng.uniform(*_ROBUST_RULED_OPACITY_RANGE)),
+            "color_bgr": (min(255, gray + blue_bias), gray, gray),
+            "opaque_lines": True,
+        }
+    return {}
 
 
 def _sample_robust_grid_params(
@@ -192,6 +397,7 @@ def _apply_random_degradation(
     image: np.ndarray,
     rng: np.random.Generator,
     robust: bool = False,
+    archetype: bool = False,
 ) -> np.ndarray:
     """Elige y aplica una degradación aleatoria según _DEGRADATION_WEIGHTS.
 
@@ -202,27 +408,35 @@ def _apply_random_degradation(
     rng : np.random.Generator
         Fuente de aleatoriedad.
     robust : bool
-        Si es True, las cuadrículas usan el muestreo domain-robust de
-        Phase 5 (spacing denso, colores oscuros, blend opaco). Las demás
-        degradaciones no cambian.
+        Si es True, cuadrículas y pautas usan el muestreo domain-robust de
+        Phase 5 (spacing denso, colores oscuros, blend opaco). Watermark no
+        cambia.
+    archetype : bool
+        Si es True (implica robust), fuerza el arquetipo milimetrado
+        impreso: siempre cuadrícula, con todos los ejes correlacionados en
+        el régimen duro. Sin efecto si robust es False.
 
     Returns
     -------
     np.ndarray
         Imagen degradada BGR, shape (H, W, 3), dtype uint8.
     """
+    if robust and archetype:
+        return add_blue_grid(image, rng, **_sample_archetype_grid_params(rng))
+
     weights = _DEGRADATION_WEIGHTS / _DEGRADATION_WEIGHTS.sum()
     choice = int(rng.choice(len(weights), p=weights))
 
     grid_kwargs: dict = _sample_robust_grid_params(rng) if robust else {}
+    ruled_kwargs: dict = _sample_robust_ruled_params(rng) if robust else {}
 
     if choice == 0:
         return add_blue_grid(image, rng, **grid_kwargs)
     elif choice == 1:
-        return add_ruled_lines(image, rng)
+        return add_ruled_lines(image, rng, **ruled_kwargs)
     elif choice == 2:
         img = add_blue_grid(image, rng, **grid_kwargs)
-        return add_ruled_lines(img, rng)
+        return add_ruled_lines(img, rng, **ruled_kwargs)
     else:
         text = str(rng.choice(_WATERMARK_TEXTS))
         return add_watermark(image, rng, text=text)
@@ -250,6 +464,8 @@ def _worker_task(idx: int) -> int:
         args["size"],
         args["seed"],
         domain_robust_prob=args["domain_robust_prob"],
+        real_bg_paths=args["real_bg_paths"],
+        real_bg_prob=args["real_bg_prob"],
     )
 
     dirty_path = dirty_dir / f"dirty_{idx:06d}.png"
@@ -273,6 +489,8 @@ def generate_dataset(
     seed: int = _DEFAULT_SEED,
     workers: int = _DEFAULT_WORKERS,
     domain_robust_prob: float = _DEFAULT_DOMAIN_ROBUST_PROB,
+    real_bg_dir: Path | None = None,
+    real_bg_prob: float = _DEFAULT_REAL_BG_PROB,
 ) -> None:
     """Genera `n` pares (dirty, clean) y los guarda en output_dir.
 
@@ -291,7 +509,22 @@ def generate_dataset(
     domain_robust_prob : float
         Fracción esperada de pares con muestreo domain-robust de Phase 5.
         0.0 reproduce la distribución v1.0; el default es 0.5.
+    real_bg_dir : Path | None
+        Directorio con tiles .png de fondo real (salida de
+        scripts/harvest_backgrounds.py). None desactiva la rama real.
+    real_bg_prob : float
+        Fracción esperada de pares compuestos sobre fondo real, si
+        real_bg_dir contiene tiles válidos.
     """
+    real_bg_paths: tuple[str, ...] = ()
+    if real_bg_dir is not None:
+        real_bg_paths = tuple(str(q) for q in sorted(real_bg_dir.glob("*.png")))
+        if not real_bg_paths:
+            print(
+                f"[WARN] --real-bg-dir {real_bg_dir} no contiene .png; "
+                "se genera 100% sintético",
+                file=sys.stderr,
+            )
     dirty_dir = output_dir / "dirty"
     clean_dir = output_dir / "clean"
     dirty_dir.mkdir(parents=True, exist_ok=True)
@@ -303,6 +536,8 @@ def generate_dataset(
         "size": size,
         "seed": seed,
         "domain_robust_prob": domain_robust_prob,
+        "real_bg_paths": real_bg_paths,
+        "real_bg_prob": real_bg_prob if real_bg_paths else 0.0,
     }
 
     if workers <= 1:
@@ -378,6 +613,26 @@ ejemplos:
         help=f"Procesos paralelos [default: {_DEFAULT_WORKERS}]",
     )
     p.add_argument(
+        "--real-bg-dir",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Directorio con tiles de fondo real cosechados "
+            "(scripts/harvest_backgrounds.py). Desactivado por defecto."
+        ),
+    )
+    p.add_argument(
+        "--real-bg-prob",
+        type=float,
+        default=_DEFAULT_REAL_BG_PROB,
+        metavar="P",
+        help=(
+            "Fracción de pares compuestos sobre fondo real, si --real-bg-dir "
+            f"tiene tiles [default: {_DEFAULT_REAL_BG_PROB}]"
+        ),
+    )
+    p.add_argument(
         "--domain-robust-prob",
         type=float,
         default=_DEFAULT_DOMAIN_ROBUST_PROB,
@@ -406,6 +661,9 @@ def main() -> None:
     if not 0.0 <= args.domain_robust_prob <= 1.0:
         print("[ERROR] --domain-robust-prob debe estar en [0.0, 1.0]", file=sys.stderr)
         sys.exit(1)
+    if not 0.0 <= args.real_bg_prob <= 1.0:
+        print("[ERROR] --real-bg-prob debe estar en [0.0, 1.0]", file=sys.stderr)
+        sys.exit(1)
 
     print("DocClean-Net — Generador de dataset sintético")
     print(
@@ -421,6 +679,8 @@ def main() -> None:
         seed=args.seed,
         workers=args.workers,
         domain_robust_prob=args.domain_robust_prob,
+        real_bg_dir=Path(args.real_bg_dir) if args.real_bg_dir else None,
+        real_bg_prob=args.real_bg_prob,
     )
 
 
