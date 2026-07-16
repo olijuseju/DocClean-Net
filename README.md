@@ -10,12 +10,28 @@ Two independent approaches, built side by side on purpose: a deterministic class
 
 ## Demo
 
-![Diagram, with detail crop](docs/demo_2_diagram_detail.png)
+![Network diagram, with detail crop](docs/demo_2_escaner_good.png)
 
-*Original → classic pipeline → DocClean-Net, with a zoomed detail crop showing stroke fidelity next to the removed grid. More examples in [`docs/`](docs).*
+*Dense printed grid removed completely, faint pencil arrows preserved in the zoomed crop — the model's whole contract in one image: strip structure, keep deliberate strokes. Generated with `scripts/visualize_results.py`, which applies the same black-point finishing pass (`scripts/boost_black.py`) as the GUI, so this matches what a person actually gets.*
 
-![Notes, color pencil](docs/demo_1_notes_color.png)
-![Code notes](docs/demo_3_code_notes.png)
+![Handwritten code notes](docs/demo_3_overview.png)
+
+*Where the classic pipeline struggles most: dense ruled-line pages turn into speckled noise under adaptive thresholding, while DocClean-Net stays legible. The strongest single argument in this repo for training a network instead of hand-tuning thresholds.*
+
+![Phone-camera photo, math notes](docs/demo_4_dibujo.png)
+
+*Not a flatbed scan — a phone-camera photo. Confirms the domain-robustness work (real-background compositing over 6 real paper/lighting domains, see [Technical lessons](#technical-lessons)) generalizes beyond scanner input.*
+
+![Low-contrast page](docs/demo_6_edge_case.png)
+
+*Faint ballpoint on a washed-out page: the classic pipeline collapses into noise, DocClean-Net holds up. Not to be confused with the genuine low-contrast failure mode documented under [Known limitations](#known-limitations) below — this particular case the network handles fine.*
+
+![Pipeline architecture diagram](docs/demo_9.png)
+![Pipeline architecture diagram, detail crop](docs/demo9_details.png)
+
+*A hand-drawn diagram of this project's own architecture, cleaned by the project's own network — original → classic pipeline → DocClean-Net, then a zoomed crop on the RGB→grayscale→U-Net→decoder chain.*
+
+More examples in [`docs/`](docs).
 
 ## Why this exists
 
