@@ -14,7 +14,7 @@ Two independent approaches, built side by side on purpose: a deterministic class
 
 *Dense printed grid removed completely, faint pencil arrows preserved in the zoomed crop — the model's whole contract in one image: strip structure, keep deliberate strokes. Generated with `scripts/visualize_results.py`, which applies the same black-point finishing pass (`scripts/boost_black.py`) as the GUI, so this matches what a person actually gets.*
 
-![Handwritten code notes](docs/demo_3_overview.png)
+![Handwritten code notes](docs/demo_3_overviewH.png)
 
 *Where the classic pipeline struggles most: dense ruled-line pages turn into speckled noise under adaptive thresholding, while DocClean-Net stays legible. The strongest single argument in this repo for training a network instead of hand-tuning thresholds.*
 
