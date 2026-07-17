@@ -168,7 +168,7 @@ The U-Net GUI runs the (slow) network pass once per image and caches the raw out
 
 ## Interactive GUI
 
-![DocClean-Net Inference Studio](docs/gui_overview.png)
+![DocClean-Net Inference Studio](docs/gui_overview2.png)
 
 Beyond the command line, DocClean-Net ships an interactive desktop app for
 tuning results page by page. The window shows the original scan and the
