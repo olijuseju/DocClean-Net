@@ -43,6 +43,13 @@ data/synthetic/
 data/real_test/
 !data/real_test/.gitkeep
 
+# ── Real background tiles harvested for training (regenerate with
+#    scripts/harvest_backgrounds.py; personal source photos/scans, not
+#    meant to live in git even when content itself is innocuous) ─────────────
+data/real_backgrounds/
+!data/real_backgrounds/.gitkeep
+contact_sheet.jpg
+
 # ── Jupyter ───────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 *.ipynb_checkpoints
