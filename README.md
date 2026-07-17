@@ -166,6 +166,36 @@ docclean-inference-gui   # U-Net pipeline: live sliders for white point, dot are
 ```
 The U-Net GUI runs the (slow) network pass once per image and caches the raw output; every slider only recomputes the (cheap) post-processing on top, applied on demand via "Apply changes" rather than live on drag. UX polish (layout, first-run experience) is planned future work.
 
+## Interactive GUI
+
+![DocClean-Net Inference Studio](docs/gui_overview.png)
+
+Beyond the command line, DocClean-Net ships an interactive desktop app for
+tuning results page by page. The window shows the original scan and the
+restored output side by side, with **synchronised zoom and pan** — zoom into a
+region on either panel and the other follows, so you can inspect the same
+patch of ink before and after at any magnification. Post-processing is driven
+by sliders paired with numeric entries (white point, speckle removal, ink
+threshold, stroke thickness); nothing recomputes until you press **Apply**, so
+you can dial in several parameters and evaluate them as one change.
+
+The design point that makes this practical: sliding-window U-Net inference is
+the slow step (~4.5 s per page on CPU), so it runs **once per image** on a
+background thread and its raw output is cached. Every subsequent parameter
+tweak only re-runs the post-processing stage on that cache, which is a
+millisecond-scale operation. Loaded pages appear in a clickable thumbnail
+strip with a ✓ marker once processed, and can be navigated with the arrow
+keys or by jumping to a page number. **Process all** runs inference across the
+whole batch with a progress bar, and **Save all** exports every page with the
+current settings applied.
+
+```bash
+python -m gui.inference_gui --model checkpoints/best.pt
+```
+
+A separate GUI for the classic pipeline lives in `gui/digitize_gui.py`
+(`docclean-gui`), including a manual paint layer for touch-ups.
+
 ## Repository structure
 
 ```
