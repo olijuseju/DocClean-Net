@@ -149,14 +149,28 @@ python scripts/visualize_results.py -i scan.png -m checkpoints/best.pt -o compar
 python scripts/harvest_backgrounds.py --input-dir path/to/scans --output-dir data/real_backgrounds
 ```
 
-**Interactive GUIs** — two, side by side:
+## Interactive GUI
+
+![Inference GUI overview](docs/gui_overview2.png)
+
+Two Tkinter GUIs ship with the project, one per pipeline:
+
 ```bash
-docclean-gui             # classic pipeline, manual paint/erase touch-up
-docclean-inference-gui   # U-Net pipeline: live sliders for white point, dot area,
-                          # ink threshold, stroke thickness; synchronized zoom/pan;
-                          # batch processing; thumbnail navigation
+docclean-gui             # classic pipeline: manual paint/erase touch-up on the deterministic output
+docclean-inference-gui   # U-Net pipeline: full interactive control over post-processing
 ```
-The U-Net GUI runs the (slow) network pass once per image and caches the raw output; every slider only recomputes the (cheap) post-processing on top, applied on demand via "Apply changes" rather than live on drag. UX polish (layout, first-run experience) is planned future work.
+
+The U-Net GUI (`gui/inference_gui.py` + `gui/inference_core.py`) is more than a thin wrapper around `predict_image()` — it's built around a specific performance trade-off: the network pass is slow and only needs to run once per image, while post-processing (white point, denoise, thicken) is cheap and benefits from being tweaked interactively. So the raw U-Net output is computed once per image, in a background thread, and cached; every slider (white point, dot area, ink threshold, stroke thickness) only recomputes the cheap post-processing on top, applied on demand via "Apply changes" rather than live on every drag.
+
+Beyond that core design:
+- Synchronized zoom/pan between the Original and Result panels
+- Batch mode — process a whole folder, "Process all" / "Save all"
+- Thumbnail panel with per-image processed/unprocessed markers, jump-to-page
+- Remembers the last checkpoint path between sessions
+- Optional drag-and-drop (`tkinterdnd2`), keyboard shortcuts (←/→, Ctrl+S, Enter)
+- PyTorch errors translated into actionable messages instead of raw tracebacks
+
+The GUI's core post-processing logic (`gui/inference_core.py`) is tested (tkinter itself isn't importable headlessly in CI, same reason `digitize_gui.py` has no direct tests); the interactive layer was validated by inspection plus a full manual pass on a real machine, since it was originally written without a display available in the dev environment. UX polish (first-run experience, layout refinement) is planned future work.
 
 ## Repository structure
 
