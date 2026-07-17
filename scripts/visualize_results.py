@@ -8,11 +8,18 @@ Produces a side-by-side PNG figure. With --crop, adds a second row zoomed
 into a region of interest — useful for inspecting stroke thickness and
 faint-detail preservation up close.
 
+The U-Net panel goes through scripts.boost_black by default (same as the
+GUI/run_pipeline finishing pass), so what you see here matches what a
+person actually gets, not the raw un-boosted network output. Use
+--black-point off to see the network's raw output instead.
+
 Usage (from the repo root):
     python scripts/visualize_results.py --input data/real_test/21.png \
         --model checkpoints/best.pt
     python scripts/visualize_results.py --input scan.png \
         --model checkpoints/best.pt --crop 400 600 500 500 -o comparison.png
+    python scripts/visualize_results.py --input scan.png \
+        --model checkpoints/best.pt --black-point off  # raw network output
 """
 
 import argparse
@@ -38,6 +45,7 @@ import numpy as np
 from classic_pipeline.digitize_notebook import digitize
 from inference.io_utils import _imread
 from inference.predict import predict_image
+from scripts.boost_black import boost_black
 
 
 def _crop_region(image: np.ndarray, x: int, y: int, w: int, h: int) -> np.ndarray:
@@ -70,6 +78,7 @@ def build_comparison_figure(
     classic_gray: np.ndarray,
     dl_gray: np.ndarray,
     crop: tuple[int, int, int, int] | None = None,
+    dl_title: str = "DocClean-Net (U-Net)",
 ) -> plt.Figure:
     """Build the original|classic|DL comparison figure.
 
@@ -79,6 +88,8 @@ def build_comparison_figure(
             dtype uint8.
         dl_gray (np.ndarray): U-Net output, shape (H, W), dtype uint8.
         crop: optional (x, y, w, h) region; adds a second zoomed row.
+        dl_title: panel title for the DL column — used to disclose whether
+            boost_black was applied (see main()'s --black-point).
 
     Returns:
         plt.Figure: the assembled figure (caller saves/closes it).
@@ -91,7 +102,7 @@ def build_comparison_figure(
     panels = [
         (original_rgb, "Original", None),
         (classic_gray, "Classic pipeline", "gray"),
-        (dl_gray, "DocClean-Net (U-Net)", "gray"),
+        (dl_gray, dl_title, "gray"),
     ]
     for ax, (img, title, cmap) in zip(axes[0], panels):
         ax.imshow(img, cmap=cmap, vmin=0 if cmap else None, vmax=255 if cmap else None)
@@ -139,8 +150,33 @@ def main() -> None:
         metavar=("X", "Y", "W", "H"),
         help="Optional zoom region; adds a second row to the figure",
     )
+    parser.add_argument(
+        "--black-point",
+        default="auto",
+        help="Black-point boost applied to the U-Net panel, same convention "
+        'as scripts.boost_black: "auto" (default, matches the GUI/'
+        'run_pipeline finishing pass), an int in [0, 254], or "off" for '
+        "the network's raw output.",
+    )
     parser.add_argument("--device", default="auto", help="auto | cpu | cuda")
     args = parser.parse_args()
+
+    if args.black_point == "off":
+        black_point: int | str | None = None
+    elif args.black_point == "auto":
+        black_point = "auto"
+    else:
+        try:
+            black_point = int(args.black_point)
+        except ValueError:
+            print(
+                "[ERROR] --black-point must be 'auto', 'off', or an int",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not 0 <= black_point <= 254:
+            print("[ERROR] --black-point int must be in [0, 254]", file=sys.stderr)
+            sys.exit(1)
 
     input_path = Path(args.input)
     try:
@@ -154,13 +190,25 @@ def main() -> None:
             classic = _imread(classic_path, flags=cv2.IMREAD_GRAYSCALE)
 
         print("Running U-Net inference ...")
-        dl = predict_image(args.model, input_path, device=args.device)
+        dl_raw = predict_image(args.model, input_path, device=args.device)
+
+        dl_title = "DocClean-Net (U-Net)"
+        if black_point is None:
+            dl = dl_raw
+        else:
+            dl = boost_black(dl_raw, black_point=black_point)
+            used_bp = black_point if black_point != "auto" else None
+            if used_bp is None:
+                from scripts.boost_black import estimate_black_point
+
+                used_bp = estimate_black_point(dl_raw)
+            dl_title = f"DocClean-Net (U-Net + black-point {used_bp})"
     except (FileNotFoundError, ValueError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         sys.exit(1)
 
     crop = tuple(args.crop) if args.crop else None
-    fig = build_comparison_figure(original, classic, dl, crop=crop)
+    fig = build_comparison_figure(original, classic, dl, crop=crop, dl_title=dl_title)
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150)

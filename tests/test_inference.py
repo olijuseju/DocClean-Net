@@ -376,6 +376,42 @@ def test_build_comparison_figure_with_crop_has_six_panels(
     plt.close(fig)
 
 
+def test_build_comparison_figure_default_dl_title_is_plain() -> None:
+    viz = _load_visualize_module()
+    gray = np.zeros((32, 32), dtype=np.uint8)
+    original = np.zeros((32, 32, 3), dtype=np.uint8)
+    fig = viz.build_comparison_figure(original, gray, gray, crop=None)
+    assert fig.axes[2].get_title() == "DocClean-Net (U-Net)"
+    import matplotlib.pyplot as plt
+
+    plt.close(fig)
+
+
+def test_build_comparison_figure_custom_dl_title_is_used() -> None:
+    viz = _load_visualize_module()
+    gray = np.zeros((32, 32), dtype=np.uint8)
+    original = np.zeros((32, 32, 3), dtype=np.uint8)
+    fig = viz.build_comparison_figure(
+        original,
+        gray,
+        gray,
+        crop=None,
+        dl_title="DocClean-Net (U-Net + black-point 45)",
+    )
+    assert fig.axes[2].get_title() == "DocClean-Net (U-Net + black-point 45)"
+    import matplotlib.pyplot as plt
+
+    plt.close(fig)
+
+
+def test_visualize_results_wires_boost_black() -> None:
+    """The DL panel must go through scripts.boost_black — a regression
+    guard against silently reverting to the raw network output."""
+    viz = _load_visualize_module()
+    assert hasattr(viz, "boost_black")
+    assert viz.boost_black.__module__ == "scripts.boost_black"
+
+
 # ── scripts/thicken_strokes.py ────────────────────────────────────────────────
 
 
