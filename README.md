@@ -10,28 +10,12 @@ Two independent approaches, built side by side on purpose: a deterministic class
 
 ## Demo
 
-![Network diagram, with detail crop](docs/demo_2_escaner_good.png)
+![Diagram, with detail crop](docs/demo_2_escaner_good.png)
 
-*Dense printed grid removed completely, faint pencil arrows preserved in the zoomed crop — the model's whole contract in one image: strip structure, keep deliberate strokes. Generated with `scripts/visualize_results.py`, which applies the same black-point finishing pass (`scripts/boost_black.py`) as the GUI, so this matches what a person actually gets.*
+*Original → classic pipeline → DocClean-Net, with a zoomed detail crop showing stroke fidelity next to the removed grid. More examples in [`docs/`](docs).*
 
-![Handwritten code notes](docs/demo_3_overviewH.png)
-
-*Where the classic pipeline struggles most: dense ruled-line pages turn into speckled noise under adaptive thresholding, while DocClean-Net stays legible. The strongest single argument in this repo for training a network instead of hand-tuning thresholds.*
-
-![Phone-camera photo, math notes](docs/demo_4_dibujo.png)
-
-*Not a flatbed scan — a phone-camera photo. Confirms the domain-robustness work (real-background compositing over 6 real paper/lighting domains, see [Technical lessons](#technical-lessons)) generalizes beyond scanner input.*
-
-![Low-contrast page](docs/demo_6_edge_case.png)
-
-*Faint ballpoint on a washed-out page: the classic pipeline collapses into noise, DocClean-Net holds up. Not to be confused with the genuine low-contrast failure mode documented under [Known limitations](#known-limitations) below — this particular case the network handles fine.*
-
-![Pipeline architecture diagram](docs/demo_9.png)
-![Pipeline architecture diagram, detail crop](docs/demo9_details.png)
-
-*A hand-drawn diagram of this project's own architecture, cleaned by the project's own network — original → classic pipeline → DocClean-Net, then a zoomed crop on the RGB→grayscale→U-Net→decoder chain.*
-
-More examples in [`docs/`](docs).
+![Notes, color pencil](docs/demo_1_notes_color.png)
+![Code notes](docs/demo_3_overviewH.png)
 
 ## Why this exists
 
@@ -74,13 +58,18 @@ The network deliberately receives raw grayscale rather than the classic pipeline
 
 ## Data
 
-10,000 synthetic 512×512 dirty/clean image pairs, generated procedurally: simulated paper texture, synthetic handwriting strokes, and degradations (blue grid, ruled lines, watermarks) composited on top with randomized parameters (`data/generators/`). No real handwriting is used for training — every real scan the model sees at inference time is out-of-sample.
+The synthetic generator (`data/generators/`) composites simulated paper texture, synthetic handwriting strokes, and degradations (blue grid, ruled lines, watermarks, bleed-through) with randomized parameters. Two training runs so far:
 
-Trained on a Colab T4 GPU, 50 epochs, ~3.9 hours total. Best checkpoint at **epoch 37**, `val_loss = 0.000805`. Full per-epoch loss curve in [`checkpoints/train_log.csv`](checkpoints/train_log.csv).
+- **v1.0** (Phase 2): 10,000 pairs, 512×512, flat/uniformly-lit synthetic paper only. 50 epochs, Colab T4, best checkpoint at **epoch 37**, `val_loss = 0.000805` ([`checkpoints/train_log_v1.0.csv`](checkpoints/train_log_v1.0.csv)).
+- **v1.1** (Phase 5): extended the generator with non-uniform illumination fields and real background tiles harvested from real scanned/photographed paper (`scripts/harvest_backgrounds.py`), aimed at closing the domain gap described in [Known limitations](#known-limitations). 50 epochs, best checkpoint at **epoch 49**, `val_loss = 0.006773` ([`checkpoints/train_log_v1.1.csv`](checkpoints/train_log_v1.1.csv)).
+
+The v1.1 validation loss is roughly 8× higher than v1.0's — **this is not a regression**, it's a harder validation set: v1.1 trains and validates against realistic illumination variation and real paper textures that v1.0 never had to handle, so the two numbers aren't comparable at face value. What matters is real-world behavior, covered honestly in [Known limitations](#known-limitations) below — the extra training-data variety was a deliberate attempt to close a specific domain gap, and it's reported there whether or not it actually did.
+
+No real handwriting is used for training either version — only backgrounds/paper texture in v1.1 come from real sources; strokes are still synthetic.
 
 ## Results
 
-Benchmarked on 11 real handwritten scans (~1700×2338 px, blue grid, ballpoint pen), never used in training or calibration. CPU-only.
+Benchmarked on 11 real handwritten scans (~1700×2338 px, blue grid, ballpoint pen), never used in training or calibration. CPU-only. Figures below are from the v1.0 benchmark run ([`benchmark_results/metrics.csv`](benchmark_results/metrics.csv)); not yet re-run against v1.1.
 
 | Metric | Classic pipeline | DocClean-Net | Notes |
 |---|---|---|---|
@@ -92,29 +81,27 @@ Benchmarked on 11 real handwritten scans (~1700×2338 px, blue grid, ballpoint p
 
 **Reading the numbers honestly**: SSIM/PSNR compare a binary output against a continuous one, so ~0.80 SSIM is a reasonable result, not a weak one. BRISQUE only tells you which of the two is relatively less "unnatural" — the absolute values mean little for scanned text. The ink-coverage gap looks alarming out of context but is cosmetic: it tracks stroke width, not missing handwriting.
 
-Full metrics: [`benchmark_results/metrics.csv`](benchmark_results/metrics.csv), plots in the same directory.
-
 ## Known limitations
 
-Two real failure modes surfaced while generating demo images, documented here rather than cropped out of the picture:
+Two real failure modes surfaced while generating demo images in Phase 4, and **remain unresolved after the Phase 5 domain-robustness retrain (v1.1)** — documented honestly rather than quietly dropped once they turned out to be harder than expected:
 
 ![Shadow artifact failure case](docs/limitation_1_shadow_artifact.png)
 
-**Domain gap with phone-camera scanning apps.** The scan above was captured with a phone scanning app (Google Drive Scan), not a flatbed scanner. Its auto-perspective-correction leaves an uneven-illumination shadow gradient the synthetic training data — flat, uniformly lit paper — never modeled. Both pipelines produce a solid dark region there instead of clean paper; DocClean-Net's is smaller than the classic pipeline's but still a real failure, not a subtle metric gap.
+**Domain gap with phone-camera scanning apps.** The scan above was captured with a phone scanning app (Google Drive Scan), not a flatbed scanner. Its auto-perspective-correction leaves an uneven-illumination shadow gradient. v1.1 added non-uniform illumination fields and real harvested backgrounds to training specifically to address this — verified against this exact image, and it still produces the same solid dark region instead of clean paper. Either the added training variety doesn't cover this specific illumination pattern closely enough, or the failure has a different root cause than a training-data gap; not yet diagnosed further.
 
 ![Low contrast failure case](docs/limitation_2_low_contrast.png)
 
-**Very low ink/background contrast.** On faint pencil writing, the grid is barely removed — the network's confidence in what counts as "ink" seems to degrade when the intensity gap between ink and grid is small, closer to the noise floor than anything in the synthetic training distribution.
-
-Both are plausibly a training-data coverage gap rather than an architecture problem — the synthetic generator doesn't currently model uneven scan-app illumination or very-low-contrast writing. Flagged as future work rather than fixed here, to avoid reopening the frozen training pipeline without a deliberate, scoped decision to do so.
+**Very low ink/background contrast.** On faint pencil writing, the grid is still barely removed under v1.1, same as v1.0. This looks less related to illumination/background variety and more to how confidently the network separates "ink" from "grid" when their intensity gap is small — a different problem from the one v1.1's training changes targeted, which may be why it didn't move.
 
 ## Technical lessons
 
-**Why the sigmoid never saturates, and what to do about it instead of retraining.** The trained network's sigmoid output plateaus around ~233, never 255 — visible as a faint residual grid ghost under the paper. Root cause is twofold: MSE loss averages over plausible outputs rather than committing to an extreme (the literature generally prefers L1 for restoration for this reason), and the synthetic "clean" targets themselves have paper at a mean of ~245, not 255. Retraining with L1 was evaluated and rejected — the cost was high and it wouldn't fix the second cause on its own. The fix that shipped instead is deterministic post-processing: estimate the paper level as the image's histogram mode minus a small margin, then linearly stretch that level to pure white (`white_point="auto"` in `predict_image()`, on by default). `white_point=None` exposes the raw network output, which the interactive GUI uses to cache the (slow) network pass once and recompute the (cheap) post-processing live.
+**Why the sigmoid never saturates, and what to do about it instead of retraining.** The trained network's sigmoid output plateaus around ~233, never 255 — visible as a faint residual grid ghost under the paper. Root cause is twofold: MSE loss averages over plausible outputs rather than committing to an extreme (the literature generally prefers L1 for restoration for this reason), and the synthetic "clean" targets themselves have paper at a mean of ~245, not 255. Retraining with L1 was evaluated and rejected — the cost was high and it wouldn't fix the second cause on its own. The fix that shipped instead is deterministic post-processing: estimate the paper level as the image's histogram mode minus a small margin, then linearly stretch that level to pure white (`white_point="auto"` in `predict_image()`, on by default), plus a complementary black-point pass (`scripts/boost_black.py`) that darkens the ink side symmetrically. `white_point=None` exposes the raw network output, which the interactive GUI uses to cache the (slow) network pass once and recompute the (cheap) post-processing live.
 
 **BRISQUE isn't in scikit-image** — a wrong assumption from early planning. It's implemented in `piq` (pure PyTorch) instead. `piq.brisque` raises an `AssertionError` on near-constant images (e.g. a stroke-free binarized page), handled by returning `NaN` and excluding it from summary means.
 
 **Post-processing order matters, empirically, not just intuitively**: denoise (remove small connected-component dots) must run *before* thicken (morphological stroke thickening), not after. Thickening a 1px noise dot first inflates it past the area filter's threshold — verified on a real test image: 532 residual noise components with thicken-first, versus 183 with denoise-first.
+
+**More training-data variety doesn't automatically fix a specific failure mode.** v1.1 was a deliberate, scoped attempt to close the two gaps above by adding illumination/background variety to training — and it didn't move either one. That's a useful negative result: it suggests the shadow-artifact and low-contrast failures need direct diagnosis (what does the raw, pre-post-processing network output actually look like on these inputs?) rather than more of the same kind of data.
 
 ## Installation
 
@@ -126,7 +113,7 @@ python -m venv .venv
 # source .venv/bin/activate       # macOS/Linux
 
 pip install -r requirements.txt
-python scripts/download_model.py  # fetches the trained checkpoint (~1.9 MB) from GitHub Releases
+python scripts/download_model.py  # fetches the trained checkpoint (v1.1, ~1.9 MB) from GitHub Releases
 ```
 
 For development (tests, linting, notebooks): `pip install -r requirements-dev.txt`.
@@ -157,6 +144,11 @@ python -m inference.benchmark --model checkpoints/best.pt --test-dir data/real_t
 python scripts/visualize_results.py -i scan.png -m checkpoints/best.pt -o comparison.png --crop 200 200 500 500
 ```
 
+**Harvest real background tiles for training** (not committed to git — regenerate locally):
+```bash
+python scripts/harvest_backgrounds.py --input-dir path/to/scans --output-dir data/real_backgrounds
+```
+
 **Interactive GUIs** — two, side by side:
 ```bash
 docclean-gui             # classic pipeline, manual paint/erase touch-up
@@ -166,49 +158,20 @@ docclean-inference-gui   # U-Net pipeline: live sliders for white point, dot are
 ```
 The U-Net GUI runs the (slow) network pass once per image and caches the raw output; every slider only recomputes the (cheap) post-processing on top, applied on demand via "Apply changes" rather than live on drag. UX polish (layout, first-run experience) is planned future work.
 
-## Interactive GUI
-
-![DocClean-Net Inference Studio](docs/gui_overview2.png)
-
-Beyond the command line, DocClean-Net ships an interactive desktop app for
-tuning results page by page. The window shows the original scan and the
-restored output side by side, with **synchronised zoom and pan** — zoom into a
-region on either panel and the other follows, so you can inspect the same
-patch of ink before and after at any magnification. Post-processing is driven
-by sliders paired with numeric entries (white point, speckle removal, ink
-threshold, stroke thickness); nothing recomputes until you press **Apply**, so
-you can dial in several parameters and evaluate them as one change.
-
-The design point that makes this practical: sliding-window U-Net inference is
-the slow step (~4.5 s per page on CPU), so it runs **once per image** on a
-background thread and its raw output is cached. Every subsequent parameter
-tweak only re-runs the post-processing stage on that cache, which is a
-millisecond-scale operation. Loaded pages appear in a clickable thumbnail
-strip with a ✓ marker once processed, and can be navigated with the arrow
-keys or by jumping to a page number. **Process all** runs inference across the
-whole batch with a progress bar, and **Save all** exports every page with the
-current settings applied.
-
-```bash
-python -m gui.inference_gui --model checkpoints/best.pt
-```
-
-A separate GUI for the classic pipeline lives in `gui/digitize_gui.py`
-(`docclean-gui`), including a manual paint layer for touch-ups.
-
 ## Repository structure
 
 ```
 classic_pipeline/   Frozen deterministic OpenCV/NumPy pipeline
-data/                Synthetic dataset generation (paper, strokes, degradations)
+data/                Synthetic dataset generation (paper, strokes, degradations, illumination)
 model/               U-Net architecture, training loop, loss
 inference/           Sliding-window inference, benchmarking, shared I/O
-scripts/             CLI entry points: run_pipeline, thicken_strokes,
-                     visualize_results, download_model
+scripts/             CLI entry points: run_pipeline, thicken_strokes, boost_black,
+                     visualize_results, download_model, harvest_backgrounds
 gui/                 Two interactive Tkinter GUIs (classic + U-Net)
-tests/               170+ tests, pytest
-checkpoints/         train_log.csv (committed); best.pt (gitignored, see Installation)
-benchmark_results/   metrics.csv + plots from the 11-scan benchmark
+tests/               230+ tests, pytest
+checkpoints/         train_log_v1.0.csv, train_log_v1.1.csv (committed);
+                     best.pt (gitignored, see Installation — currently v1.1)
+benchmark_results/   metrics.csv + plots (v1.0 benchmark run)
 docs/                Demo and limitation figures used in this README
 notebooks/           Colab training notebook
 ```
@@ -220,14 +183,15 @@ pytest -m "not slow" -v      # fast suite, no network required
 pytest -v                    # includes the slow, network-dependent download test
 ```
 
-170 fast tests + 4 slow, green on Windows (Python 3.11 and 3.13) and in CI (Python 3.10 and 3.11, Ubuntu).
+Green on Windows (Python 3.11 and 3.13) and in CI (Python 3.10 and 3.11, Ubuntu).
 
 ## Future work
 
-- **Domain-robust training data** — extend the synthetic generator with uneven-illumination/shadow augmentation (see [Known limitations](#known-limitations)) to close the gap with phone-scanning-app input, rather than only with flatbed scans.
+- **Diagnose the two remaining failure modes directly** — v1.1's added data variety didn't fix either the shadow-artifact or low-contrast case (see [Known limitations](#known-limitations)); next step is inspecting the raw network output on these specific inputs before deciding whether it's an architecture, loss, or data-representation issue rather than adding more synthetic variety blindly.
+- **Re-run the 11-scan benchmark against v1.1** — the [Results](#results) table above is still from the v1.0 checkpoint.
 - **Stroke refinement via Google Quick Draw!** — using the Quick Draw! dataset to train a dedicated stroke-thickening/refinement module, as an alternative to the current morphological thickening step.
-- **L1 loss retraining** — evaluated and rejected once already (see [Technical lessons](#technical-lessons)); could be revisited alongside the domain-robustness work above rather than in isolation.
-- **More degradation types** — coffee stains, fold creases, fainter pencil (see the low-contrast limitation above).
+- **L1 loss retraining** — evaluated and rejected once already (see [Technical lessons](#technical-lessons)).
+- **More degradation types** — coffee stains, fold creases.
 
 ## License
 
