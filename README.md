@@ -69,17 +69,17 @@ No real handwriting is used for training either version — only backgrounds/pap
 
 ## Results
 
-Benchmarked on 11 real handwritten scans (~1700×2338 px, blue grid, ballpoint pen), never used in training or calibration. CPU-only. Figures below are from the v1.0 benchmark run ([`benchmark_results/metrics.csv`](benchmark_results/metrics.csv)); not yet re-run against v1.1.
+Benchmarked on 18 real handwritten scans (~1700×2338 px and larger, blue grid, ballpoint pen), never used in training or calibration — expanded in Phase 5 from the original 11. CPU-only. Numbers below are from the **v1.1** checkpoint ([`benchmark_results/metrics.csv`](benchmark_results/metrics.csv)).
 
 | Metric | Classic pipeline | DocClean-Net | Notes |
 |---|---|---|---|
-| SSIM | (reference) | 0.80 ± 0.02 | DL measured against the classic pipeline's output as reference — there is no ground truth on real scans (n=11) |
-| PSNR (dB) | (reference) | 13.6 ± 0.6 | |
-| BRISQUE | 151.9 | 87.0 | Lower is better; relative comparison only — BRISQUE is trained on natural-image statistics, so binarized documents score high in absolute terms regardless of quality |
-| Ink coverage (%) | 8.1 | 4.1 | The gap is stroke thickness (the classic pipeline binarizes the full antialiased pen outline), not content loss — the DL/classic ratio is stable at 0.44–0.55 across all 11 images |
-| Time (ms/page) | 7,154 | 4,552 | DocClean-Net is ~1.6× faster on CPU and much more stable (±0.2 s) |
+| SSIM | (reference) | 0.77 ± 0.08 | DL measured against the classic pipeline's output as reference — there is no ground truth on real scans (n=18) |
+| PSNR (dB) | (reference) | 13.2 ± 2.9 | |
+| BRISQUE | 156.7 | 88.8 | Lower is better; relative comparison only — BRISQUE is trained on natural-image statistics, so binarized documents score high in absolute terms regardless of quality |
+| Ink coverage (%) | 9.1 | 6.2 | See below — the DL/classic ratio is stable at 0.44–0.66 for 16 of the 18 images; the other two are the documented failure cases just below, not noise |
+| Time (ms/page) | 10,690 | 6,838 | DocClean-Net is ~1.6× faster on CPU on average — consistent with the original 11-image result. Variance is much higher than before in this expanded set (one new image is far larger than the rest and takes ~40s to process on both pipelines); this is image-size heterogeneity, not a regression in speed behavior |
 
-**Reading the numbers honestly**: SSIM/PSNR compare a binary output against a continuous one, so ~0.80 SSIM is a reasonable result, not a weak one. BRISQUE only tells you which of the two is relatively less "unnatural" — the absolute values mean little for scanned text. The ink-coverage gap looks alarming out of context but is cosmetic: it tracks stroke width, not missing handwriting.
+**Reading the numbers honestly**: SSIM/PSNR compare a binary output against a continuous one, so ~0.77 SSIM is a reasonable result, not a weak one — it dropped slightly from the original 11-image figure (0.80) simply because the expanded set includes the two harder documented failure cases. BRISQUE only tells you which of the two is relatively less "unnatural" — the absolute values mean little for scanned text. The ink-coverage gap for the 16 well-behaved images is cosmetic, tracking stroke width, not missing handwriting — but for the two exceptions, see [Known limitations](#known-limitations): there the ratio flips *above* 1, which is a real, quantifiable symptom of the underlying failure, not the usual cosmetic gap.
 
 ## Known limitations
 
@@ -87,11 +87,11 @@ Two real failure modes surfaced while generating demo images in Phase 4, and **r
 
 ![Shadow artifact failure case](docs/limitation_1_shadow_artifact.png)
 
-**Domain gap with phone-camera scanning apps.** The scan above was captured with a phone scanning app (Google Drive Scan), not a flatbed scanner. Its auto-perspective-correction leaves an uneven-illumination shadow gradient. v1.1 added non-uniform illumination fields and real harvested backgrounds to training specifically to address this — verified against this exact image, and it still produces the same solid dark region instead of clean paper. Either the added training variety doesn't cover this specific illumination pattern closely enough, or the failure has a different root cause than a training-data gap; not yet diagnosed further.
+**Domain gap with phone-camera scanning apps.** The scan above was captured with a phone scanning app (Google Drive Scan), not a flatbed scanner. Its auto-perspective-correction leaves an uneven-illumination shadow gradient. v1.1 added non-uniform illumination fields and real harvested backgrounds to training specifically to address this — verified against this exact image, and it still produces the same solid dark region instead of clean paper. This is now backed by a number, not just a visual impression: the benchmark's ink-coverage ratio (DL ÷ classic) is stable around 0.44–0.66 across 16 of the 18 test images, but for this one it's **2.0×** (18.75% vs. 9.34%) — the shadow region is quantifiably being counted as ink, not just visibly wrong. Either the added training variety doesn't cover this specific illumination pattern closely enough, or the failure has a different root cause than a training-data gap; not yet diagnosed further.
 
 ![Low contrast failure case](docs/limitation_2_low_contrast.png)
 
-**Very low ink/background contrast.** On faint pencil writing, the grid is still barely removed under v1.1, same as v1.0. This looks less related to illumination/background variety and more to how confidently the network separates "ink" from "grid" when their intensity gap is small — a different problem from the one v1.1's training changes targeted, which may be why it didn't move.
+**Very low ink/background contrast, and grid removal in general on difficult pages.** On faint pencil writing, the grid is still barely removed under v1.1, same as v1.0. A third test image shows a related but distinct pattern: a page that's visibly a bit dirty, where the grid similarly isn't fully removed — its ink-coverage ratio is elevated too (1.56×), consistent with the same class of failure rather than the shadow-artifact one. This looks less related to illumination/background variety and more to how confidently the network separates "ink" from "grid" on harder pages generally — a different problem from the one v1.1's training changes targeted, which may be why it didn't move.
 
 ## Technical lessons
 
@@ -185,7 +185,7 @@ gui/                 Two interactive Tkinter GUIs (classic + U-Net)
 tests/               230+ tests, pytest
 checkpoints/         train_log_v1.0.csv, train_log_v1.1.csv (committed);
                      best.pt (gitignored, see Installation — currently v1.1)
-benchmark_results/   metrics.csv + plots (v1.0 benchmark run)
+benchmark_results/   metrics.csv + plots (18-image benchmark, v1.1 checkpoint)
 docs/                Demo and limitation figures used in this README
 notebooks/           Colab training notebook
 ```
@@ -201,8 +201,7 @@ Green on Windows (Python 3.11 and 3.13) and in CI (Python 3.10 and 3.11, Ubuntu)
 
 ## Future work
 
-- **Diagnose the two remaining failure modes directly** — v1.1's added data variety didn't fix either the shadow-artifact or low-contrast case (see [Known limitations](#known-limitations)); next step is inspecting the raw network output on these specific inputs before deciding whether it's an architecture, loss, or data-representation issue rather than adding more synthetic variety blindly.
-- **Re-run the 11-scan benchmark against v1.1** — the [Results](#results) table above is still from the v1.0 checkpoint.
+- **Diagnose the two remaining failure modes directly** — v1.1's added data variety didn't fix either the shadow-artifact or grid-removal-on-difficult-pages case (see [Known limitations](#known-limitations), now with quantitative ink-coverage evidence); next step is inspecting the raw network output on these specific inputs before deciding whether it's an architecture, loss, or data-representation issue rather than adding more synthetic variety blindly.
 - **Stroke refinement via Google Quick Draw!** — using the Quick Draw! dataset to train a dedicated stroke-thickening/refinement module, as an alternative to the current morphological thickening step.
 - **L1 loss retraining** — evaluated and rejected once already (see [Technical lessons](#technical-lessons)).
 - **More degradation types** — coffee stains, fold creases.
